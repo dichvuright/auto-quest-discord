@@ -868,39 +868,70 @@ class QuestBot(commands.Bot):
         await self._resume_sessions()
 
     async def _resume_sessions(self):
-        """Resume any sessions that were interrupted by bot restart."""
+        """Notify channels about interrupted sessions after bot restart."""
         pending = session_manager.get_pending()
         if not pending:
             return
 
-        print(f"[SESSION] Resuming {len(pending)} pending session(s)...")
+        print(f"[SESSION] Found {len(pending)} interrupted session(s)")
+
+        # Group sessions by channel
+        channel_users: dict = {}  # {channel_id: [user_mentions]}
         for sess in pending:
             try:
                 guild = self.get_guild(sess["guild_id"])
                 if not guild:
-                    print(f"[SESSION] Guild {sess['guild_id']} not found, removing session")
                     session_manager.remove(sess["user_id"])
                     continue
 
                 channel = guild.get_channel(sess["channel_id"])
                 if not channel:
-                    print(f"[SESSION] Channel {sess['channel_id']} not found, removing session")
                     session_manager.remove(sess["user_id"])
                     continue
 
-                user = guild.get_member(sess["user_id"]) or await guild.fetch_member(sess["user_id"])
+                user = guild.get_member(sess["user_id"])
                 if not user:
-                    print(f"[SESSION] User {sess['user_id']} not found, removing session")
-                    session_manager.remove(sess["user_id"])
-                    continue
+                    try:
+                        user = await guild.fetch_member(sess["user_id"])
+                    except Exception:
+                        user = None
 
-                print(f"[SESSION] Resuming quest for {user.display_name} (ID: {sess['user_id']})")
-                # Resume in background task
-                asyncio.create_task(process_quests(channel, user, sess["token"]))
+                user_display = f"<@{sess['user_id']}>" if user else f"User ID: {sess['user_id']}"
+
+                if channel.id not in channel_users:
+                    channel_users[channel.id] = {"channel": channel, "users": []}
+                channel_users[channel.id]["users"].append(user_display)
 
             except Exception as e:
-                print(f"[SESSION] Resume error for user {sess['user_id']}: {e}")
-                session_manager.remove(sess["user_id"])
+                print(f"[SESSION] Error processing session for user {sess['user_id']}: {e}")
+
+        # Send notification to each channel
+        for ch_id, data in channel_users.items():
+            channel = data["channel"]
+            users_list = "\n".join(f"• {u}" for u in data["users"])
+
+            notify_embed = discord.Embed(
+                title=f"{EMOJI_WARNING} Bot vừa khởi động lại",
+                description=(
+                    f"Các tiến trình quest sau đã bị gián đoạn:\n\n"
+                    f"{users_list}\n\n"
+                    f"Vui lòng sử dụng `/quest` để chạy lại."
+                ),
+                color=COLOR_WARNING,
+            )
+            notify_embed.set_footer(text="Quest Auto-Completer • Xin lỗi vì sự bất tiện!")
+            notify_embed.timestamp = datetime.now(timezone.utc)
+
+            try:
+                await channel.send(embed=notify_embed)
+                print(f"[SESSION] Sent restart notification to channel {ch_id}")
+            except Exception as e:
+                print(f"[SESSION] Failed to send notification to channel {ch_id}: {e}")
+
+        # Clean up all interrupted sessions
+        for sess in pending:
+            session_manager.remove(sess["user_id"])
+        print("[SESSION] All interrupted sessions cleaned up")
 
 
 bot = QuestBot()
